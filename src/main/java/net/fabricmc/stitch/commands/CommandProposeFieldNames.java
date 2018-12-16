@@ -17,22 +17,24 @@
 package net.fabricmc.stitch.commands;
 
 import net.fabricmc.stitch.Command;
-import net.fabricmc.stitch.representation.JarReader;
-import net.fabricmc.stitch.util.FieldNameFinder;
+import net.fabricmc.stitch.util.ClassProposalSet;
+import net.fabricmc.stitch.util.NameProposalIndexer;
 import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.tree.*;
-import org.objectweb.asm.tree.analysis.Analyzer;
-import org.objectweb.asm.tree.analysis.Frame;
-import org.objectweb.asm.tree.analysis.SourceInterpreter;
-import org.objectweb.asm.tree.analysis.SourceValue;
 
-import java.io.*;
-import java.util.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.jar.JarEntry;
-import java.util.jar.JarInputStream;
+import java.util.jar.JarFile;
 
 public class CommandProposeFieldNames extends Command {
     public CommandProposeFieldNames() {
@@ -51,9 +53,13 @@ public class CommandProposeFieldNames extends Command {
 
     @Override
     public void run(String[] args) throws Exception {
-        Map<String, String> fieldNames = new FieldNameFinder().find(new File(args[0]));
+        File file = new File(args[0]);
+        Map<String, ClassProposalSet> classProposals = buildProposals(file);
 
-        System.err.println("Found " + fieldNames.size() + " interesting names.");
+        int proposalCount = classProposals.values().stream()
+                .mapToInt(ClassProposalSet::getProposalCount)
+                .sum();
+        System.err.println("Found " + proposalCount + " interesting names.");
 
         try (FileInputStream fileIn = new FileInputStream(new File(args[1]))) {
             try (FileOutputStream fileOut = new FileOutputStream(new File(args[2]))) {
@@ -66,9 +72,10 @@ public class CommandProposeFieldNames extends Command {
                 while ((line = reader.readLine()) != null) {
                     String[] tabSplit = line.split("\t");
 
+                    String classKey = tabSplit[1];
                     if (headerPos < 0) {
                         // first line
-                        if (tabSplit.length < 3 || !(tabSplit[1].equals("official"))) {
+                        if (tabSplit.length < 3 || !(classKey.equals("official"))) {
                             throw new RuntimeException("Invalid mapping file!");
                         }
 
@@ -85,17 +92,24 @@ public class CommandProposeFieldNames extends Command {
                     } else {
                         // second+ line
                         if (tabSplit[0].equals("FIELD")) {
-                            String key = tabSplit[1] + ";;" + tabSplit[3];
                             String value = tabSplit[headerPos + 2];
-                            if (value.startsWith("field_") && fieldNames.containsKey(key)) {
-                                tabSplit[headerPos + 2] = fieldNames.get(key);
+                            if (value.startsWith("field_")) {
+                                ClassProposalSet proposals = classProposals.get(classKey);
 
-                                StringBuilder builder = new StringBuilder(tabSplit[0]);
-                                for (int i = 1; i < tabSplit.length; i++) {
-                                    builder.append('\t');
-                                    builder.append(tabSplit[i]);
+                                if (proposals != null) {
+                                    String fieldName = tabSplit[3];
+                                    String proposedName = proposals.getProposal(fieldName);
+                                    if (proposedName != null) {
+                                        tabSplit[headerPos + 2] = proposedName;
+
+                                        StringBuilder builder = new StringBuilder(tabSplit[0]);
+                                        for (int i = 1; i < tabSplit.length; i++) {
+                                            builder.append('\t');
+                                            builder.append(tabSplit[i]);
+                                        }
+                                        line = builder.toString();
+                                    }
                                 }
-                                line = builder.toString();
                             }
                         }
                     }
@@ -111,5 +125,32 @@ public class CommandProposeFieldNames extends Command {
                 writer.close();
             }
         }
+    }
+
+    private Map<String, ClassProposalSet> buildProposals(File file) throws IOException {
+        Map<String, ClassProposalSet> classProposals = new HashMap<>();
+        NameProposalIndexer proposalIndexer = new NameProposalIndexer();
+
+        try (JarFile jar = new JarFile(file)) {
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                if (!entry.getName().endsWith(".class")) {
+                    continue;
+                }
+
+                try (DataInputStream input = new DataInputStream(jar.getInputStream(entry))) {
+                    ClassReader reader = new ClassReader(input);
+                    String className = reader.getClassName();
+
+                    ClassProposalSet proposalSet = proposalIndexer.buildProposals(className, reader);
+                    if (!proposalSet.isEmpty()) {
+                        classProposals.put(className, proposalSet);
+                    }
+                }
+            }
+        }
+
+        return classProposals;
     }
 }

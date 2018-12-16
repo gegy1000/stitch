@@ -16,35 +16,39 @@
 
 package net.fabricmc.stitch.enigma;
 
+import cuchaz.enigma.analysis.JarIndex;
+import cuchaz.enigma.analysis.ParsedJar;
 import cuchaz.enigma.api.EnigmaPlugin;
-import net.fabricmc.stitch.util.FieldNameFinder;
-import org.objectweb.asm.tree.ClassNode;
+import cuchaz.enigma.mapping.entry.Entry;
+import net.fabricmc.stitch.util.ClassProposalSet;
+import net.fabricmc.stitch.util.NameProposalIndexer;
 
 import javax.annotation.Nullable;
-import java.io.File;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.function.Function;
 
-public class StitchEnigmaPlugin extends EnigmaPlugin {
-    private Map<String, String> fieldNames;
+public class StitchEnigmaPlugin implements EnigmaPlugin {
+    private final Map<String, ClassProposalSet> classProposals = new HashMap<>();
 
     @Override
-    public void onClassesLoaded(Map<String, byte[]> classData, Function<String, ClassNode> classNodeGetter) {
-        try {
-            fieldNames = new FieldNameFinder().find(classData.values());
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+    public void indexJar(ParsedJar jar, JarIndex index) {
+        NameProposalIndexer proposalIndexer = new NameProposalIndexer();
+        jar.visitReader(reader -> {
+            String className = reader.getClassName();
+            ClassProposalSet proposalSet = proposalIndexer.buildProposals(className, reader);
+            if (!proposalSet.isEmpty()) {
+                this.classProposals.put(className, proposalSet);
+            }
+        });
     }
 
     @Nullable
     @Override
-    public String proposeFieldName(String owner, String name, String desc) {
-        if (fieldNames != null) {
-            String key = owner + ";;" + name;
-            return fieldNames.getOrDefault(key, null);
-        } else {
-            return null;
+    public String proposeName(Entry obfEntry, Entry deobfEntry) {
+        ClassProposalSet classProposals = this.classProposals.get(obfEntry.getClassName());
+        if (classProposals != null) {
+            return classProposals.getProposal(obfEntry.getName());
         }
+        return null;
     }
 }
